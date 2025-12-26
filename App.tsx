@@ -1,6 +1,5 @@
 
 import React, { useState, useRef, useEffect, useCallback } from 'react';
-import { analyzeSvg } from './services/geminiService';
 import { SvgConverter } from './services/converter';
 import { ExportFormat, ConverterSettings, SvgAnalysis } from './types';
 
@@ -42,7 +41,6 @@ const App: React.FC = () => {
   const [isProcessing, setIsProcessing] = useState(false);
   const [progress, setProgress] = useState(0);
   const [analysis, setAnalysis] = useState<SvgAnalysis | null>(null);
-  const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [resultUrl, setResultUrl] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -57,32 +55,39 @@ const App: React.FC = () => {
 
   const converterRef = useRef<SvgConverter>(null);
 
+  const updateLocalAnalysis = useCallback((code: string) => {
+    try {
+      const parser = new DOMParser();
+      const doc = parser.parseFromString(code, 'image/svg+xml');
+      const svg = doc.querySelector('svg');
+      if (!svg) return;
+      
+      const newAnalysis: SvgAnalysis = {
+        hasSmil: !!code.match(/<(animate|animateTransform|animateMotion|animateColor|set)/i),
+        hasCssAnimation: code.includes('animation:') || code.includes('@keyframes'),
+        viewBox: svg.getAttribute('viewBox'),
+        width: parseFloat(svg.getAttribute('width') || svg.viewBox?.baseVal?.width?.toString() || '500'),
+        height: parseFloat(svg.getAttribute('height') || svg.viewBox?.baseVal?.height?.toString() || '500'),
+        suggestedDuration: 5
+      };
+      setAnalysis(newAnalysis);
+    } catch (e) {
+      console.warn("Local SVG parsing failed", e);
+    }
+  }, []);
+
   useEffect(() => {
     // @ts-ignore
     converterRef.current = new SvgConverter();
-  }, []);
+    updateLocalAnalysis(svgCode);
+  }, [updateLocalAnalysis]);
 
   const handleSvgChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
-    setSvgCode(e.target.value);
+    const code = e.target.value;
+    setSvgCode(code);
     setResultUrl(null);
+    updateLocalAnalysis(code);
   };
-
-  const runAnalysis = useCallback(async () => {
-    if (!svgCode.trim()) return;
-    setIsAnalyzing(true);
-    try {
-      const res = await analyzeSvg(svgCode);
-      setAnalysis(res);
-      setSettings(prev => ({ 
-        ...prev, 
-        duration: res.suggestedDuration > 0 ? Math.min(res.suggestedDuration, 10) : 4 
-      }));
-    } catch (err) {
-      console.error(err);
-    } finally {
-      setIsAnalyzing(false);
-    }
-  }, [svgCode]);
 
   const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -92,6 +97,7 @@ const App: React.FC = () => {
         const content = event.target?.result as string;
         setSvgCode(content);
         setResultUrl(null);
+        updateLocalAnalysis(content);
       };
       reader.readAsText(file);
     }
@@ -247,16 +253,9 @@ const App: React.FC = () => {
           <div className="flex space-x-2">
              <label className="cursor-pointer bg-slate-50 text-slate-600 px-4 py-2 rounded-xl text-sm font-bold hover:bg-slate-100 transition-colors border border-slate-200 flex items-center">
               <i className="fas fa-upload mr-2"></i>
-              Import
+              Import SVG
               <input type="file" accept=".svg" onChange={handleFileUpload} className="hidden" />
             </label>
-            <button 
-              onClick={runAnalysis}
-              className={`bg-indigo-50 text-indigo-600 px-4 py-2 rounded-xl text-sm font-bold hover:bg-indigo-100 transition-colors border border-indigo-100 flex items-center ${isAnalyzing ? 'animate-pulse' : ''}`}
-            >
-              <i className="fas fa-magic mr-2"></i>
-              Smart Detect
-            </button>
           </div>
         </header>
 
@@ -291,15 +290,17 @@ const App: React.FC = () => {
                 <div className="mt-6 grid grid-cols-3 gap-4">
                   <div className="bg-slate-50 p-4 rounded-2xl border border-slate-100">
                     <p className="text-[9px] uppercase text-slate-400 font-bold mb-1">Canvas</p>
-                    <p className="text-xs font-bold text-slate-700">{Math.round(analysis.width * settings.scale)}px</p>
+                    <p className="text-xs font-bold text-slate-700">{Math.round(analysis.width * settings.scale)}px × {Math.round(analysis.height * settings.scale)}px</p>
                   </div>
                   <div className="bg-slate-50 p-4 rounded-2xl border border-slate-100">
                     <p className="text-[9px] uppercase text-slate-400 font-bold mb-1">Capture</p>
                     <p className="text-xs font-bold text-slate-700">{settings.duration}s Loop</p>
                   </div>
                   <div className="bg-slate-50 p-4 rounded-2xl border border-slate-100">
-                    <p className="text-[9px] uppercase text-slate-400 font-bold mb-1">Type</p>
-                    <p className="text-xs font-bold text-indigo-600">Animated</p>
+                    <p className="text-[9px] uppercase text-slate-400 font-bold mb-1">Animations</p>
+                    <p className="text-xs font-bold text-indigo-600">
+                      {analysis.hasSmil || analysis.hasCssAnimation ? 'Detected' : 'None'}
+                    </p>
                   </div>
                 </div>
               )}
