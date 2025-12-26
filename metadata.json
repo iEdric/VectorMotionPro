@@ -1,0 +1,5 @@
+{
+  "name": "VectorMotion Pro: SVG to Video/GIF Converter",
+  "description": "A high-performance online tool to convert SVG animations into stable, high-compatibility MP4 and GIF files using frame-accurate canvas rendering.",
+  "requestFramePermissions": []
+}
