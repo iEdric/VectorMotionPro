@@ -4,7 +4,7 @@ import { ConverterSettings, ExportFormat } from "../types";
 export class SvgConverter {
   private canvas: HTMLCanvasElement;
   private ctx: CanvasRenderingContext2D;
-  private liveContainer: HTMLDivElement | null = null;
+  private offscreenContainer: HTMLDivElement | null = null;
 
   constructor() {
     this.canvas = document.createElement('canvas');
@@ -12,37 +12,28 @@ export class SvgConverter {
       willReadFrequently: true,
       alpha: true 
     });
-    if (!context) throw new Error("Could not initialize canvas context");
+    if (!context) throw new Error("Canvas 2D context not supported");
     this.ctx = context;
   }
 
-  private ensureContainer() {
-    if (!this.liveContainer) {
-      this.liveContainer = document.createElement('div');
-      this.liveContainer.style.position = 'fixed';
-      this.liveContainer.style.top = '-10000px';
-      this.liveContainer.style.left = '-10000px';
-      this.liveContainer.style.width = '1px';
-      this.liveContainer.style.height = '1px';
-      this.liveContainer.style.overflow = 'hidden';
-      document.body.appendChild(this.liveContainer);
+  private getContainer() {
+    if (!this.offscreenContainer) {
+      this.offscreenContainer = document.createElement('div');
+      this.offscreenContainer.style.cssText = 'position:fixed;top:-10000px;left:-10000px;width:1px;height:1px;overflow:hidden;';
+      document.body.appendChild(this.offscreenContainer);
     }
-    return this.liveContainer;
+    return this.offscreenContainer;
   }
 
-  private async waitForGifshot(): Promise<any> {
-    const check = () => (window as any).gifshot;
-    if (check()) return check();
+  private async ensureGifshot() {
+    const gs = (window as any).gifshot;
+    if (gs) return gs;
 
-    // Try to dynamically inject if it failed to load from HTML
     return new Promise((resolve, reject) => {
       const script = document.createElement('script');
       script.src = 'https://unpkg.com/gifshot@0.4.5/dist/gifshot.min.js';
-      script.onload = () => {
-        if (check()) resolve(check());
-        else reject(new Error("Gifshot failed to initialize after dynamic load."));
-      };
-      script.onerror = () => reject(new Error("Failed to load GIF engine from CDN."));
+      script.onload = () => resolve((window as any).gifshot);
+      script.onerror = () => reject(new Error("Failed to load GIF engine. Check connection."));
       document.head.appendChild(script);
     });
   }
@@ -52,9 +43,9 @@ export class SvgConverter {
     settings: ConverterSettings,
     onProgress: (percent: number) => void
   ): Promise<Blob> {
-    const { width, height } = this.getDimensions(svgString, settings.scale);
-    this.canvas.width = width;
-    this.canvas.height = height;
+    const dimensions = this.getDimensions(svgString, settings.scale);
+    this.canvas.width = dimensions.width;
+    this.canvas.height = dimensions.height;
 
     if (settings.format === ExportFormat.GIF) {
       return this.generateGif(svgString, settings, onProgress);
@@ -66,36 +57,33 @@ export class SvgConverter {
   private getDimensions(svgString: string, scale: number) {
     const parser = new DOMParser();
     const doc = parser.parseFromString(svgString, 'image/svg+xml');
-    const svgEl = doc.querySelector('svg');
+    const svg = doc.querySelector('svg');
     
-    let width = 500;
-    let height = 500;
-
-    if (svgEl) {
-      width = parseFloat(svgEl.getAttribute('width') || svgEl.viewBox.baseVal.width.toString() || '500');
-      height = parseFloat(svgEl.getAttribute('height') || svgEl.viewBox.baseVal.height.toString() || '500');
+    let w = 400, h = 400;
+    if (svg) {
+      w = parseFloat(svg.getAttribute('width') || svg.viewBox?.baseVal?.width?.toString() || '400');
+      h = parseFloat(svg.getAttribute('height') || svg.viewBox?.baseVal?.height?.toString() || '400');
     }
 
-    return { 
-      width: Math.round(width * scale), 
-      height: Math.round(height * scale) 
-    };
+    // Ensure even dimensions for video codecs
+    const width = Math.floor(w * scale / 2) * 2;
+    const height = Math.floor(h * scale / 2) * 2;
+
+    return { width, height };
   }
 
   private async captureFrame(svgString: string, time: number, settings: ConverterSettings): Promise<string> {
-    const container = this.ensureContainer();
+    const container = this.getContainer();
     container.innerHTML = svgString;
-    const liveSvg = container.querySelector('svg');
-    if (!liveSvg) throw new Error("Invalid SVG structure");
+    const svg = container.querySelector('svg');
+    if (!svg) throw new Error("Invalid SVG");
 
-    // Seek SMIL
-    if (typeof liveSvg.setCurrentTime === 'function') {
-      try {
-        liveSvg.setCurrentTime(time);
-      } catch (e) {}
+    // SMIL Seek
+    if (typeof (svg as any).setCurrentTime === 'function') {
+      try { (svg as any).setCurrentTime(time); } catch (e) {}
     }
 
-    // Seek CSS Animations
+    // CSS Animation Seek (Negative Delay Trick)
     const style = document.createElementNS('http://www.w3.org/2000/svg', 'style');
     style.textContent = `
       * {
@@ -104,12 +92,11 @@ export class SvgConverter {
         transition: none !important;
       }
     `;
-    liveSvg.appendChild(style);
+    svg.appendChild(style);
 
-    // Serialize to Image
     const serializer = new XMLSerializer();
-    const svgBlob = new Blob([serializer.serializeToString(liveSvg)], { type: 'image/svg+xml;charset=utf-8' });
-    const url = URL.createObjectURL(svgBlob);
+    const blob = new Blob([serializer.serializeToString(svg)], { type: 'image/svg+xml;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
 
     try {
       const img = await this.loadImage(url);
@@ -124,7 +111,7 @@ export class SvgConverter {
       return this.canvas.toDataURL('image/png');
     } finally {
       URL.revokeObjectURL(url);
-      container.innerHTML = ''; // Clean up
+      container.innerHTML = '';
     }
   }
 
@@ -133,31 +120,29 @@ export class SvgConverter {
     settings: ConverterSettings, 
     onProgress: (percent: number) => void
   ): Promise<Blob> {
-    const gs = await this.waitForGifshot();
-    
+    const gifshot = await this.ensureGifshot();
     const totalFrames = Math.ceil(settings.duration * settings.fps);
-    const frameDuration = 1 / settings.fps;
+    const frameInterval = 1 / settings.fps;
     const frames: string[] = [];
 
     for (let i = 0; i < totalFrames; i++) {
-      const dataUrl = await this.captureFrame(svgString, i * frameDuration, settings);
-      frames.push(dataUrl);
+      frames.push(await this.captureFrame(svgString, i * frameInterval, settings));
       onProgress(Math.round((i / totalFrames) * 60));
     }
 
     return new Promise((resolve, reject) => {
-      gs.createGIF({
+      gifshot.createGIF({
         images: frames,
         gifWidth: this.canvas.width,
         gifHeight: this.canvas.height,
-        interval: frameDuration,
+        interval: frameInterval,
         numFrames: totalFrames,
         progressCallback: (p: number) => onProgress(60 + Math.round(p * 40))
       }, (obj: any) => {
         if (!obj.error) {
-          fetch(obj.image).then(res => res.blob()).then(resolve);
+          fetch(obj.image).then(r => r.blob()).then(resolve);
         } else {
-          reject(new Error("GIF generation failed: " + obj.errorMsg));
+          reject(new Error(obj.errorMsg));
         }
       });
     });
@@ -169,42 +154,42 @@ export class SvgConverter {
     onProgress: (percent: number) => void
   ): Promise<Blob> {
     const stream = this.canvas.captureStream(settings.fps);
-    const mimeTypes = ['video/mp4;codecs=h264', 'video/mp4', 'video/webm;codecs=vp9', 'video/webm'];
-    const selectedMime = mimeTypes.find(m => MediaRecorder.isTypeSupported(m)) || 'video/webm';
+    const mimes = ['video/mp4;codecs=h264', 'video/mp4', 'video/webm;codecs=vp9', 'video/webm'];
+    const mime = mimes.find(m => MediaRecorder.isTypeSupported(m)) || 'video/webm';
     
     const recorder = new MediaRecorder(stream, {
-      mimeType: selectedMime,
-      videoBitsPerSecond: 25000000 * settings.quality
+      mimeType: mime,
+      videoBitsPerSecond: 15000000 * settings.quality
     });
 
     const chunks: Blob[] = [];
-    recorder.ondataavailable = (e) => { if (e.data.size > 0) chunks.push(e.data); };
+    recorder.ondataavailable = (e) => chunks.push(e.data);
     
-    const promise = new Promise<Blob>((resolve) => {
-      recorder.onstop = () => resolve(new Blob(chunks, { type: selectedMime }));
+    const result = new Promise<Blob>((resolve) => {
+      recorder.onstop = () => resolve(new Blob(chunks, { type: mime }));
     });
 
     const totalFrames = Math.ceil(settings.duration * settings.fps);
-    const frameDuration = 1 / settings.fps;
+    const frameInterval = 1 / settings.fps;
 
     recorder.start();
 
     for (let i = 0; i < totalFrames; i++) {
-      await this.captureFrame(svgString, i * frameDuration, settings);
-      // Ensure the MediaRecorder frame clock is satisfied
-      await new Promise(r => setTimeout(r, (1000 / settings.fps) + 5));
+      await this.captureFrame(svgString, i * frameInterval, settings);
+      // Buffer delay for recorder to process the frame
+      await new Promise(r => setTimeout(r, (1000 / settings.fps) + 10));
       onProgress(Math.round((i / totalFrames) * 100));
     }
 
     recorder.stop();
-    return promise;
+    return result;
   }
 
   private loadImage(url: string): Promise<HTMLImageElement> {
     return new Promise((resolve, reject) => {
       const img = new Image();
       img.onload = () => resolve(img);
-      img.onerror = () => reject(new Error("Failed to load SVG frame"));
+      img.onerror = () => reject(new Error("Frame generation error"));
       img.src = url;
     });
   }
